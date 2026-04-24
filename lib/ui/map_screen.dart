@@ -2,9 +2,11 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import '../services/graph_service.dart';
+import '../services/graph_model.dart';
+import '../services/traffic_manager.dart';
 import '../services/routing_engine.dart';
 import '../services/routing_service.dart';
+import '../controllers/simulation_controller.dart';
 import '../algorithms/base_algorithm.dart';
 import '../models/hospital.dart';
 import 'bottom_sheet.dart';
@@ -19,14 +21,13 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
-  final GraphService _graphService = GraphService();
-  final RoutingEngine _routingEngine = RoutingEngine();
+  late final GraphModel _graphModel;
+  late final TrafficManager _trafficManager;
+  late final RoutingEngine _routingEngine;
+  late final SimulationController _simulationController;
   final RoutingService _osrmRoutingService = RoutingService();
 
   String _selectedEmergency = 'General Emergency';
-  bool _trafficEnabled = false;
-  
-  AlgorithmResult? _bestResult;
   Hospital? _targetHospital;
   List<LatLng>? _roadPath;
   
@@ -38,6 +39,20 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    
+    // Initialize services
+    _graphModel = GraphModel();
+    _trafficManager = TrafficManager(_graphModel);
+    _routingEngine = RoutingEngine();
+    _simulationController = SimulationController(
+      graph: _graphModel,
+      trafficManager: _trafficManager,
+      routingEngine: _routingEngine,
+    );
+
+    // Listen for simulation changes
+    _simulationController.addListener(_onSimulationChanged);
+
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
@@ -47,10 +62,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
-    // Initial target
-    _targetHospital = _graphService.hospitals.firstWhere((h) => h.name == 'Premchand Oswal Hospital', orElse: () => _graphService.hospitals.first);
+    _targetHospital = _graphModel.hospitals.firstWhere((h) => h.name == 'Premchand Oswal Hospital', orElse: () => _graphModel.hospitals.first);
     
-    // Automatically calculate initial route
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _calculateRoute();
     });
@@ -58,40 +71,47 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _simulationController.removeListener(_onSimulationChanged);
+    _simulationController.dispose();
     _pulseController.dispose();
     super.dispose();
+  }
+
+  void _onSimulationChanged() {
+    _calculateRoute();
   }
 
   void _calculateRoute() async {
     if (_targetHospital == null) return;
     
-    final results = _routingEngine.runAll(
-      _graphService.adjacencyList,
-      _graphService.ambulanceLocation,
+    _simulationController.updateRoute(
+      _graphModel.ambulanceLocation,
       _targetHospital!,
     );
 
-    final best = _routingEngine.selectBest(results);
+    final best = _simulationController.bestRoute;
     List<LatLng>? roadPath;
 
     if (best != null && best.path.isNotEmpty) {
       final points = best.path.map((n) => n.position).toList();
-      // Pass ONLY the start and end points to OSRM to get a perfectly smooth road route
-      // Passing every intermediate node causes zig-zags if nodes aren't perfectly on roads
       final routeWaypoints = [points.first, points.last];
       
       roadPath = await _osrmRoutingService.fetchRoute(routeWaypoints);
 
-      final bounds = LatLngBounds.fromPoints(roadPath ?? points);
-      _mapController.fitCamera(
-        CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(80)),
-      );
+      // Smooth camera transition
+      if (roadPath != null || points.isNotEmpty) {
+        final bounds = LatLngBounds.fromPoints(roadPath ?? points);
+        _mapController.fitCamera(
+          CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(80)),
+        );
+      }
     }
 
-    setState(() {
-      _bestResult = best;
-      _roadPath = roadPath;
-    });
+    if (mounted) {
+      setState(() {
+        _roadPath = roadPath;
+      });
+    }
   }
 
   void _onHospitalSelected(Hospital hospital) {
@@ -105,26 +125,49 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     if (val != null) {
       setState(() {
         _selectedEmergency = val;
+        _targetHospital = _graphModel.getPriorityHospital(val);
       });
+      _calculateRoute();
     }
   }
 
   void _onTrafficToggled(bool val) {
-    setState(() {
-      _trafficEnabled = val;
-      _graphService.toggleTraffic(val);
-      _calculateRoute(); // Recalculate based on traffic
-    });
+    _simulationController.toggleTrafficSimulation(val);
+  }
+
+  void _onBlockRandomRoad() {
+    _simulationController.blockRandomRoad();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Road blocked! Rerouting...'),
+        backgroundColor: Colors.orange,
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
+  void _onResetMap() {
+    _simulationController.resetMap();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Map reset to default state.'),
+        backgroundColor: Colors.blueGrey,
+        duration: Duration(seconds: 1),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // Generate ETA/Distance based on the selected hospital or best result
-    final distanceStr = _bestResult != null ? _bestResult!.totalWeight.toStringAsFixed(1) : '0.0';
-    final etaStr = _bestResult != null ? (_bestResult!.totalWeight * 3.5).toStringAsFixed(0) : '0';
+    final bestResult = _simulationController.bestRoute;
     
-    final trafficStatus = _trafficEnabled ? 'Heavy Traffic' : 'Light Traffic';
-    final trafficColor = _trafficEnabled ? const Color(0xFFEF4444) : const Color(0xFF10B981);
+    // Generate ETA/Distance based on the selected hospital or best result
+    final distanceStr = bestResult != null ? bestResult.totalWeight.toStringAsFixed(1) : '0.0';
+    final etaStr = bestResult != null ? (bestResult.totalWeight * 3.5).toStringAsFixed(0) : '0';
+    
+    final trafficEnabled = _simulationController.isTrafficSimulationEnabled;
+    final trafficStatus = trafficEnabled ? 'Heavy Traffic' : 'Light Traffic';
+    final trafficColor = trafficEnabled ? const Color(0xFFEF4444) : const Color(0xFF10B981);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -134,13 +177,26 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
-              initialCenter: _graphService.ambulanceLocation.position,
+              initialCenter: _graphModel.ambulanceLocation.position,
               initialZoom: 14.0,
             ),
             children: [
               TileLayer(
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.example.emergency_route_optimizer',
+              ),
+              // Blocked Roads Layer
+              PolylineLayer(
+                polylines: _graphModel.adjacencyList.values
+                    .expand((e) => e)
+                    .where((e) => e.isBlocked)
+                    .map((e) => Polyline(
+                          points: [e.source.position, e.destination.position],
+                          color: Colors.orange.withOpacity(0.8),
+                          strokeWidth: 8.0,
+                          pattern: const StrokePattern.dashed(segments: [10, 5]),
+                        ))
+                    .toList(),
               ),
               PolylineLayer(
                 polylines: [
@@ -153,9 +209,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       strokeJoin: StrokeJoin.round,
                       strokeCap: StrokeCap.round,
                     )
-                  else if (_bestResult != null)
+                  else if (bestResult != null)
                     Polyline(
-                      points: _bestResult!.path.map((n) => n.position).toList(),
+                      points: bestResult.path.map((n) => n.position).toList(),
                       color: const Color(0xFF3B82F6).withOpacity(0.3),
                       strokeWidth: 16.0,
                       strokeJoin: StrokeJoin.round,
@@ -170,9 +226,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       strokeJoin: StrokeJoin.round,
                       strokeCap: StrokeCap.round,
                     )
-                  else if (_bestResult != null)
+                  else if (bestResult != null)
                     Polyline(
-                      points: _bestResult!.path.map((n) => n.position).toList(),
+                      points: bestResult.path.map((n) => n.position).toList(),
                       color: Colors.white,
                       strokeWidth: 10.0,
                       strokeJoin: StrokeJoin.round,
@@ -187,9 +243,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       strokeJoin: StrokeJoin.round,
                       strokeCap: StrokeCap.round,
                     )
-                  else if (_bestResult != null)
+                  else if (bestResult != null)
                     Polyline(
-                      points: _bestResult!.path.map((n) => n.position).toList(),
+                      points: bestResult.path.map((n) => n.position).toList(),
                       color: const Color(0xFF3B82F6),
                       strokeWidth: 6.0,
                       strokeJoin: StrokeJoin.round,
@@ -200,7 +256,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               MarkerLayer(
                 markers: [
                   // Other hospitals (small red pins)
-                  ..._graphService.hospitals.where((h) => h != _targetHospital).map((h) => Marker(
+                  ..._graphModel.hospitals.where((h) => h != _targetHospital).map((h) => Marker(
                     point: h.position,
                     width: 30,
                     height: 30,
@@ -222,8 +278,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   )),
                   
                   // Route path nodes (white circles at bends)
-                  if (_bestResult != null)
-                    ..._bestResult!.path.skip(1).take(_bestResult!.path.length - 2).map((n) => Marker(
+                  if (bestResult != null)
+                    ...bestResult.path.skip(1).take(bestResult.path.length - 2).map((n) => Marker(
                       point: n.position,
                       width: 12,
                       height: 12,
@@ -289,7 +345,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
                   // Ambulance (Blue dot with white ring and pulsing halo)
                   Marker(
-                    point: _graphService.ambulanceLocation.position,
+                    point: _graphModel.ambulanceLocation.position,
                     width: 60,
                     height: 60,
                     child: AnimatedBuilder(
@@ -387,7 +443,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               children: [
                 GestureDetector(
                   onTap: () {
-                    _mapController.move(_graphService.ambulanceLocation.position, 14.0);
+                    _mapController.move(_graphModel.ambulanceLocation.position, 14.0);
                   },
                   child: _buildFloatingActionButton(Icons.my_location),
                 ),
@@ -412,10 +468,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 
                 // Traffic Toggle
                 GestureDetector(
-                  onTap: () => _onTrafficToggled(!_trafficEnabled),
+                  onTap: () => _onTrafficToggled(!_simulationController.isTrafficSimulationEnabled),
                   child: _buildFloatingActionButton(
                     Icons.traffic_outlined,
-                    color: _trafficEnabled ? const Color(0xFFEF4444) : Colors.black87,
+                    color: _simulationController.isTrafficSimulationEnabled ? const Color(0xFFEF4444) : Colors.black87,
                   ),
                 ),
               ],
@@ -424,7 +480,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
           // 4. Hospital Selection Card
           HospitalSelectionCard(
-            hospitals: _graphService.hospitals,
+            hospitals: _graphModel.hospitals,
             selectedHospital: _targetHospital,
             onHospitalSelected: _onHospitalSelected,
           ),
@@ -440,9 +496,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           // 6. Bottom Sheet Controls
           CustomBottomSheet(
             selectedEmergency: _selectedEmergency,
-            trafficEnabled: _trafficEnabled,
+            trafficEnabled: _simulationController.isTrafficSimulationEnabled,
             onEmergencyChanged: _onEmergencyChanged,
             onTrafficToggled: _onTrafficToggled,
+            onBlockRandomRoad: _onBlockRandomRoad,
+            onResetMap: _onResetMap,
             onStartNavigation: _calculateRoute,
           ),
         ],

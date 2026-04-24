@@ -4,15 +4,13 @@ import '../models/node.dart';
 import '../models/edge.dart';
 import '../models/hospital.dart';
 
-class GraphService {
+class GraphModel {
   final Map<Node, List<Edge>> adjacencyList = {};
   final List<Node> nodes = [];
   final List<Hospital> hospitals = [];
   late Node ambulanceLocation;
 
-  bool isTrafficEnabled = false;
-
-  GraphService() {
+  GraphModel() {
     _initializeData();
   }
 
@@ -81,20 +79,11 @@ class GraphService {
     adjacencyList.putIfAbsent(v, () => []).add(Edge(source: v, destination: u, weight: weight));
   }
 
-  void toggleTraffic(bool enabled) {
-    isTrafficEnabled = enabled;
-    final random = Random();
+  void resetGraph() {
     for (var edges in adjacencyList.values) {
       for (var edge in edges) {
-        if (isTrafficEnabled) {
-          // Increase weights randomly or simulate block
-          edge.trafficMultiplier = 1.0 + random.nextDouble() * 5.0; // 1x to 6x
-          if (random.nextDouble() < 0.1) {
-            edge.trafficMultiplier = 1000.0; // Simulated block
-          }
-        } else {
-          edge.trafficMultiplier = 1.0;
-        }
+        edge.trafficMultiplier = 1.0;
+        edge.isBlocked = false;
       }
     }
   }
@@ -105,7 +94,6 @@ class GraphService {
     } else if (emergencyType == 'Accident') {
       return hospitals.firstWhere((h) => h.type == HospitalType.trauma);
     } else {
-      // Find nearest
       Hospital nearest = hospitals[0];
       double minDist = double.infinity;
       for (var h in hospitals) {

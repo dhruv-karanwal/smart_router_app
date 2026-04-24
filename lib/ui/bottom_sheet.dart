@@ -5,6 +5,8 @@ class CustomBottomSheet extends StatelessWidget {
   final bool trafficEnabled;
   final ValueChanged<String?> onEmergencyChanged;
   final ValueChanged<bool> onTrafficToggled;
+  final VoidCallback onBlockRandomRoad;
+  final VoidCallback onResetMap;
   final VoidCallback onStartNavigation;
 
   const CustomBottomSheet({
@@ -13,6 +15,8 @@ class CustomBottomSheet extends StatelessWidget {
     required this.trafficEnabled,
     required this.onEmergencyChanged,
     required this.onTrafficToggled,
+    required this.onBlockRandomRoad,
+    required this.onResetMap,
     required this.onStartNavigation,
   }) : super(key: key);
 
@@ -40,7 +44,6 @@ class CustomBottomSheet extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Drag Handle
               Container(
                 width: 48,
                 height: 5,
@@ -51,8 +54,30 @@ class CustomBottomSheet extends StatelessWidget {
                 ),
               ),
               
-              // Row with Traffic and Emergency Type removed as requested
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildActionBtn(
+                      label: 'Block Road',
+                      icon: Icons.block,
+                      color: Colors.orange.shade700,
+                      onTap: onBlockRandomRoad,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildActionBtn(
+                      label: 'Reset Map',
+                      icon: Icons.refresh,
+                      color: Colors.blueGrey,
+                      onTap: onResetMap,
+                    ),
+                  ),
+                ],
+              ),
+              
               const SizedBox(height: 16),
+              
               // Gradient CTA Button
               Container(
                 width: double.infinity,
@@ -100,6 +125,41 @@ class CustomBottomSheet extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionBtn({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          border: Border.all(color: color.withOpacity(0.3)),
+          borderRadius: BorderRadius.circular(16),
+          color: color.withOpacity(0.05),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
+            ),
+          ],
         ),
       ),
     );

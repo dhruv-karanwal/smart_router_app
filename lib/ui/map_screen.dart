@@ -4,10 +4,12 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../services/graph_service.dart';
 import '../services/routing_engine.dart';
+import '../services/routing_service.dart';
 import '../algorithms/base_algorithm.dart';
 import '../models/hospital.dart';
 import 'bottom_sheet.dart';
-import 'algorithm_panel.dart';
+import 'hospital_selection_card.dart';
+import 'eta_distance_card.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -19,16 +21,16 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   final GraphService _graphService = GraphService();
   final RoutingEngine _routingEngine = RoutingEngine();
+  final RoutingService _osrmRoutingService = RoutingService();
 
-  String _selectedEmergency = 'General';
+  String _selectedEmergency = 'General Emergency';
   bool _trafficEnabled = false;
   
-  List<AlgorithmResult> _allResults = [];
   AlgorithmResult? _bestResult;
   Hospital? _targetHospital;
+  List<LatLng>? _roadPath;
   
   final MapController _mapController = MapController();
-  bool _isLoading = false;
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -41,12 +43,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 1500),
     )..repeat(reverse: true);
     
-    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.5).animate(
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.6).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
-    // Initial target based on default selection
-    _targetHospital = _graphService.getPriorityHospital(_selectedEmergency);
+    // Initial target
+    _targetHospital = _graphService.hospitals.firstWhere((h) => h.name == 'Premchand Oswal Hospital', orElse: () => _graphService.hospitals.first);
+    
+    // Automatically calculate initial route
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _calculateRoute();
+    });
   }
 
   @override
@@ -55,45 +62,49 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  Future<void> _calculateRoute() async {
-    setState(() {
-      _isLoading = true;
-      _targetHospital = _graphService.getPriorityHospital(_selectedEmergency);
-    });
-
-    // Simulate network/computation delay for loading animation effect
-    await Future.delayed(const Duration(milliseconds: 600));
-
+  void _calculateRoute() async {
+    if (_targetHospital == null) return;
+    
     final results = _routingEngine.runAll(
       _graphService.adjacencyList,
       _graphService.ambulanceLocation,
       _targetHospital!,
     );
 
-    setState(() {
-      _allResults = results;
-      _bestResult = _routingEngine.selectBest(results);
-      _isLoading = false;
-    });
+    final best = _routingEngine.selectBest(results);
+    List<LatLng>? roadPath;
 
-    if (_bestResult != null && _bestResult!.path.isNotEmpty) {
-      // Fit map to route
-      final points = _bestResult!.path.map((n) => n.position).toList();
-      final bounds = LatLngBounds.fromPoints(points);
+    if (best != null && best.path.isNotEmpty) {
+      final points = best.path.map((n) => n.position).toList();
+      // Pass ONLY the start and end points to OSRM to get a perfectly smooth road route
+      // Passing every intermediate node causes zig-zags if nodes aren't perfectly on roads
+      final routeWaypoints = [points.first, points.last];
+      
+      roadPath = await _osrmRoutingService.fetchRoute(routeWaypoints);
+
+      final bounds = LatLngBounds.fromPoints(roadPath ?? points);
       _mapController.fitCamera(
-        CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(50)),
+        CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(80)),
       );
     }
+
+    setState(() {
+      _bestResult = best;
+      _roadPath = roadPath;
+    });
+  }
+
+  void _onHospitalSelected(Hospital hospital) {
+    setState(() {
+      _targetHospital = hospital;
+    });
+    _calculateRoute();
   }
 
   void _onEmergencyChanged(String? val) {
     if (val != null) {
       setState(() {
         _selectedEmergency = val;
-        _targetHospital = _graphService.getPriorityHospital(val);
-        // Clear previous results when emergency type changes
-        _allResults = [];
-        _bestResult = null;
       });
     }
   }
@@ -102,14 +113,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     setState(() {
       _trafficEnabled = val;
       _graphService.toggleTraffic(val);
-      // Clear previous results as traffic changed
-      _allResults = [];
-      _bestResult = null;
+      _calculateRoute(); // Recalculate based on traffic
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    // Generate ETA/Distance based on the selected hospital or best result
+    final distanceStr = _bestResult != null ? _bestResult!.totalWeight.toStringAsFixed(1) : '0.0';
+    final etaStr = _bestResult != null ? (_bestResult!.totalWeight * 3.5).toStringAsFixed(0) : '0';
+    
+    final trafficStatus = _trafficEnabled ? 'Heavy Traffic' : 'Light Traffic';
+    final trafficColor = _trafficEnabled ? const Color(0xFFEF4444) : const Color(0xFF10B981);
+
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
@@ -128,14 +144,50 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               ),
               PolylineLayer(
                 polylines: [
-                  // Alternate routes (Thin grey lines)
-                  ..._allResults.where((r) => r != _bestResult).map((res) => Polyline(
-                    points: res.path.map((n) => n.position).toList(),
-                    color: Colors.grey.withOpacity(0.6),
-                    strokeWidth: 3.0,
-                  )),
-                  // Best route (Thick blue line)
-                  if (_bestResult != null)
+                  // Soft Glow Effect (Highly transparent, thick blue)
+                  if (_roadPath != null)
+                    Polyline(
+                      points: _roadPath!,
+                      color: const Color(0xFF3B82F6).withOpacity(0.3),
+                      strokeWidth: 16.0,
+                      strokeJoin: StrokeJoin.round,
+                      strokeCap: StrokeCap.round,
+                    )
+                  else if (_bestResult != null)
+                    Polyline(
+                      points: _bestResult!.path.map((n) => n.position).toList(),
+                      color: const Color(0xFF3B82F6).withOpacity(0.3),
+                      strokeWidth: 16.0,
+                      strokeJoin: StrokeJoin.round,
+                      strokeCap: StrokeCap.round,
+                    ),
+                  // Best route Outline (Thick White)
+                  if (_roadPath != null)
+                    Polyline(
+                      points: _roadPath!,
+                      color: Colors.white,
+                      strokeWidth: 10.0,
+                      strokeJoin: StrokeJoin.round,
+                      strokeCap: StrokeCap.round,
+                    )
+                  else if (_bestResult != null)
+                    Polyline(
+                      points: _bestResult!.path.map((n) => n.position).toList(),
+                      color: Colors.white,
+                      strokeWidth: 10.0,
+                      strokeJoin: StrokeJoin.round,
+                      strokeCap: StrokeCap.round,
+                    ),
+                  // Best route Core (Thin Blue)
+                  if (_roadPath != null)
+                    Polyline(
+                      points: _roadPath!,
+                      color: const Color(0xFF3B82F6),
+                      strokeWidth: 6.0,
+                      strokeJoin: StrokeJoin.round,
+                      strokeCap: StrokeCap.round,
+                    )
+                  else if (_bestResult != null)
                     Polyline(
                       points: _bestResult!.path.map((n) => n.position).toList(),
                       color: const Color(0xFF3B82F6),
@@ -147,54 +199,95 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               ),
               MarkerLayer(
                 markers: [
-                  // Other hospitals (small, faded)
+                  // Other hospitals (small red pins)
                   ..._graphService.hospitals.where((h) => h != _targetHospital).map((h) => Marker(
                     point: h.position,
                     width: 30,
                     height: 30,
                     child: Opacity(
-                      opacity: 0.5,
+                      opacity: 0.6,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: const Color(0xFFEF4444),
                           shape: BoxShape.circle,
-                          boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 2)],
+                          border: Border.all(color: Colors.white, width: 2),
                         ),
-                        child: Icon(
-                          _getHospitalIcon(h.type),
-                          color: Colors.grey,
-                          size: 18,
+                        child: const Icon(
+                          Icons.local_hospital,
+                          color: Colors.white,
+                          size: 14,
                         ),
                       ),
                     ),
                   )),
                   
-                  // Target Hospital (Highlighted, larger)
+                  // Route path nodes (white circles at bends)
+                  if (_bestResult != null)
+                    ..._bestResult!.path.skip(1).take(_bestResult!.path.length - 2).map((n) => Marker(
+                      point: n.position,
+                      width: 12,
+                      height: 12,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: const Color(0xFF3B82F6), width: 2),
+                        ),
+                      ),
+                    )),
+
+                  // Target Hospital (Large red pin with text)
                   if (_targetHospital != null)
                     Marker(
                       point: _targetHospital!.position,
-                      width: 60,
-                      height: 60,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(0xFF10B981).withOpacity(0.4),
-                              blurRadius: 15,
-                              spreadRadius: 5,
-                            )
-                          ],
-                        ),
-                        child: Icon(
-                          _getHospitalIcon(_targetHospital!.type),
-                          color: const Color(0xFF10B981),
-                          size: 40,
-                        ),
+                      width: 100,
+                      height: 80,
+                      alignment: Alignment.topCenter,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFEF4444),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                              boxShadow: const [
+                                BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
+                              ],
+                            ),
+                            child: const Icon(
+                              Icons.local_hospital,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.9),
+                              borderRadius: BorderRadius.circular(4),
+                              boxShadow: const [
+                                BoxShadow(color: Colors.black12, blurRadius: 2, offset: Offset(0, 1))
+                              ],
+                            ),
+                            child: Text(
+                              _targetHospital!.name.split(' ').take(2).join('\n'),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFFEF4444),
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                height: 1.1,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
 
-                  // Ambulance (Pulsing blue icon)
+                  // Ambulance (Blue dot with white ring and pulsing halo)
                   Marker(
                     point: _graphService.ambulanceLocation.position,
                     width: 60,
@@ -202,17 +295,33 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     child: AnimatedBuilder(
                       animation: _pulseAnimation,
                       builder: (context, child) {
-                        return Transform.scale(
-                          scale: _pulseAnimation.value,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: const Color(0xFF3B82F6).withOpacity(0.3),
+                        return Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Transform.scale(
+                              scale: _pulseAnimation.value,
+                              child: Container(
+                                width: 30,
+                                height: 30,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: const Color(0xFF3B82F6).withOpacity(0.3),
+                                ),
+                              ),
                             ),
-                            child: const Center(
-                              child: Icon(Icons.emergency, color: Color(0xFF3B82F6), size: 30),
+                            Container(
+                              width: 18,
+                              height: 18,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: const Color(0xFF3B82F6),
+                                border: Border.all(color: Colors.white, width: 3),
+                                boxShadow: const [
+                                  BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
+                                ],
+                              ),
                             ),
-                          ),
+                          ],
                         );
                       },
                     ),
@@ -227,101 +336,106 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             top: 0,
             left: 0,
             right: 0,
-            child: ClipRRect(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                child: Container(
-                  padding: EdgeInsets.only(
-                    top: MediaQuery.of(context).padding.top + 10,
-                    bottom: 15,
-                    left: 20,
-                    right: 20,
+            child: Container(
+              padding: EdgeInsets.only(
+                top: MediaQuery.of(context).padding.top + 10,
+                bottom: 15,
+                left: 16,
+                right: 16,
+              ),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 10,
+                    offset: const Offset(0, 2),
                   ),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.05),
-                        blurRadius: 10,
-                        offset: const Offset(0, 2),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEF4444),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.add, color: Colors.white, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Emergency Route Optimizer',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
                       ),
-                    ],
+                    ),
                   ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.local_hospital, color: Color(0xFFEF4444)),
-                      SizedBox(width: 10),
-                      Text(
-                        'Emergency Route Optimizer',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                ],
               ),
             ),
           ),
 
-          // 3. Floating Legend
-          if (_allResults.isNotEmpty)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 70,
-              right: 16,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.9),
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(color: Colors.black12, blurRadius: 5, spreadRadius: 1)
-                  ],
+          // 3. Right Action Buttons
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 80,
+            right: 16,
+            child: Column(
+              children: [
+                GestureDetector(
+                  onTap: () {
+                    _mapController.move(_graphService.ambulanceLocation.position, 14.0);
+                  },
+                  child: _buildFloatingActionButton(Icons.my_location),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildLegendItem(Colors.blue, 'Best Route'),
-                    const SizedBox(height: 4),
-                    _buildLegendItem(Colors.grey, 'Alternate'),
-                  ],
-                ),
-              ),
-            ),
-
-          // 4. Algorithm Panel (Draggable)
-          if (_allResults.isNotEmpty)
-            AlgorithmPanel(
-              results: _allResults,
-              bestResult: _bestResult,
-            ),
-
-          // 5. Loading Overlay
-          if (_isLoading)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black.withOpacity(0.3),
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: const Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircularProgressIndicator(color: Color(0xFF3B82F6)),
-                        SizedBox(height: 16),
-                        Text('Computing routes...'),
-                      ],
-                    ),
+                const SizedBox(height: 12),
+                
+                // Emergency Type Selector
+                PopupMenuButton<String>(
+                  onSelected: _onEmergencyChanged,
+                  initialValue: _selectedEmergency,
+                  offset: const Offset(-160, 0),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  itemBuilder: (context) => ['General Emergency', 'Heart Attack', 'Accident']
+                      .map((e) => PopupMenuItem(value: e, child: Text(e)))
+                      .toList(),
+                  child: _buildFloatingActionButton(
+                    Icons.medical_services_outlined,
+                    color: _selectedEmergency != 'General Emergency' ? const Color(0xFFEF4444) : Colors.black87,
                   ),
                 ),
-              ),
+                
+                const SizedBox(height: 12),
+                
+                // Traffic Toggle
+                GestureDetector(
+                  onTap: () => _onTrafficToggled(!_trafficEnabled),
+                  child: _buildFloatingActionButton(
+                    Icons.traffic_outlined,
+                    color: _trafficEnabled ? const Color(0xFFEF4444) : Colors.black87,
+                  ),
+                ),
+              ],
             ),
+          ),
+
+          // 4. Hospital Selection Card
+          HospitalSelectionCard(
+            hospitals: _graphService.hospitals,
+            selectedHospital: _targetHospital,
+            onHospitalSelected: _onHospitalSelected,
+          ),
+
+          // 5. ETA & Distance Card
+          EtaDistanceCard(
+            eta: '$etaStr min',
+            distance: '$distanceStr km',
+            trafficStatus: trafficStatus,
+            trafficColor: trafficColor,
+          ),
 
           // 6. Bottom Sheet Controls
           CustomBottomSheet(
@@ -329,37 +443,33 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             trafficEnabled: _trafficEnabled,
             onEmergencyChanged: _onEmergencyChanged,
             onTrafficToggled: _onTrafficToggled,
-            onFindRoute: _calculateRoute,
+            onStartNavigation: _calculateRoute,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildLegendItem(Color color, String label) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 12,
-          height: 3,
-          color: color,
-        ),
-        const SizedBox(width: 8),
-        Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w500)),
-      ],
+  Widget _buildFloatingActionButton(IconData? icon, {String? text, Color color = Colors.black87}) {
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Center(
+        child: icon != null 
+            ? Icon(icon, color: color)
+            : Text(text ?? '', style: TextStyle(fontWeight: FontWeight.bold, color: color)),
+      ),
     );
-  }
-
-  IconData _getHospitalIcon(HospitalType type) {
-    switch (type) {
-      case HospitalType.cardiac:
-        return Icons.favorite;
-      case HospitalType.trauma:
-        return Icons.accessible;
-      case HospitalType.general:
-      default:
-        return Icons.local_hospital;
-    }
   }
 }

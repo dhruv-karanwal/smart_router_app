@@ -25,33 +25,40 @@ class GraphService {
 
     final hA = Hospital(
       id: 'hosp_a',
-      name: 'Hospital A (Cardiac)',
+      name: 'Premchand Oswal Hospital',
       position: LatLng(18.4700, 73.8700),
       type: HospitalType.cardiac,
     );
 
     final hB = Hospital(
       id: 'hosp_b',
-      name: 'Hospital B (General)',
+      name: 'Mahesh Hospital',
       position: LatLng(18.4550, 73.8800),
       type: HospitalType.general,
     );
 
     final hC = Hospital(
       id: 'hosp_c',
-      name: 'Hospital C (Trauma)',
+      name: 'City Care Hospital',
       position: LatLng(18.4600, 73.8600),
       type: HospitalType.trauma,
     );
 
-    hospitals.addAll([hA, hB, hC]);
+    final hD = Hospital(
+      id: 'hosp_d',
+      name: 'Sukhsagar Hospital',
+      position: LatLng(18.4620, 73.8690),
+      type: HospitalType.general,
+    );
+
+    hospitals.addAll([hA, hB, hC, hD]);
 
     final i1 = Node(id: 'i1', name: 'Intersection 1', position: LatLng(18.4650, 73.8650));
     final i2 = Node(id: 'i2', name: 'Intersection 2', position: LatLng(18.4680, 73.8680));
     final i3 = Node(id: 'i3', name: 'Intersection 3', position: LatLng(18.4580, 73.8700));
     final i4 = Node(id: 'i4', name: 'Intersection 4', position: LatLng(18.4600, 73.8750));
 
-    nodes.addAll([ambulanceLocation, hA, hB, hC, i1, i2, i3, i4]);
+    nodes.addAll([ambulanceLocation, hA, hB, hC, hD, i1, i2, i3, i4]);
 
     _addEdge(ambulanceLocation, i1, 0.5);
     _addEdge(ambulanceLocation, i3, 0.7);
@@ -65,6 +72,8 @@ class GraphService {
     _addEdge(i4, i2, 0.8); // Bidirectional
     _addEdge(hC, i3, 0.4);
     _addEdge(hA, i2, 0.3);
+    _addEdge(hD, i2, 0.4);
+    _addEdge(hD, i4, 0.5);
   }
 
   void _addEdge(Node u, Node v, double weight) {

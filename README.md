@@ -1,6 +1,6 @@
 # emergency_route_optimizer
 
-A new Flutter project.
+A new Flutter project.\
 
 ## Getting Started
 

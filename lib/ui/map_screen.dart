@@ -194,7 +194,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                           points: [e.source.position, e.destination.position],
                           color: Colors.orange.withOpacity(0.8),
                           strokeWidth: 8.0,
-                          pattern: const StrokePattern.dashed(segments: [10, 5]),
+                          pattern: StrokePattern.dashed(segments: [10, 5]),
                         ))
                     .toList(),
               ),

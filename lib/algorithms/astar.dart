@@ -17,9 +17,9 @@ class AStarNode implements Comparable<AStarNode> {
 
 class AStarAlgorithm extends BaseAlgorithm {
   double _heuristic(Node a, Node b) {
-    // Euclidean distance
+    // Euclidean distance in degrees converted to km (approx)
     return sqrt(pow(a.position.latitude - b.position.latitude, 2) +
-        pow(a.position.longitude - b.position.longitude, 2));
+        pow(a.position.longitude - b.position.longitude, 2)) * 111;
   }
 
   @override

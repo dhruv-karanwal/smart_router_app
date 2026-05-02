@@ -2,42 +2,56 @@ import 'dart:math';
 import '../models/edge.dart';
 import 'graph_model.dart';
 
-enum TrafficLevel { low, medium, high }
+enum TrafficScenario { normal, heavy, emergency, custom }
 
 class TrafficManager {
   final GraphModel graph;
   final Random _random = Random();
+  
+  double _manualIntensity = 0.5;
+  TrafficScenario _currentScenario = TrafficScenario.normal;
 
   TrafficManager(this.graph);
 
-  void updateTraffic(bool simulate) {
+  void setManualIntensity(double intensity) {
+    _manualIntensity = intensity;
+    _currentScenario = TrafficScenario.custom;
+    applyTraffic();
+  }
+
+  void setScenario(TrafficScenario scenario) {
+    _currentScenario = scenario;
+    applyTraffic();
+  }
+
+  void applyTraffic() {
     for (var edges in graph.adjacencyList.values) {
       for (var edge in edges) {
-        if (simulate) {
-          final level = _getRandomTrafficLevel();
-          edge.trafficMultiplier = _getMultiplier(level);
-        } else {
-          edge.trafficMultiplier = 1.0;
+        switch (_currentScenario) {
+          case TrafficScenario.normal:
+            edge.trafficLevel = _random.nextDouble() * 0.3;
+            edge.riskFactor = 0.1;
+            break;
+          case TrafficScenario.heavy:
+            edge.trafficLevel = 0.6 + (_random.nextDouble() * 0.4);
+            edge.riskFactor = 0.2;
+            break;
+          case TrafficScenario.emergency:
+            edge.trafficLevel = 0.4 + (_random.nextDouble() * 0.4);
+            edge.riskFactor = 0.7; // Higher risk of blockages
+            break;
+          case TrafficScenario.custom:
+            edge.trafficLevel = _manualIntensity;
+            edge.riskFactor = _manualIntensity * 0.5;
+            break;
         }
       }
     }
   }
 
-  TrafficLevel _getRandomTrafficLevel() {
-    final rand = _random.nextDouble();
-    if (rand < 0.6) return TrafficLevel.low;
-    if (rand < 0.9) return TrafficLevel.medium;
-    return TrafficLevel.high;
-  }
-
-  double _getMultiplier(TrafficLevel level) {
-    switch (level) {
-      case TrafficLevel.low:
-        return 1.0;
-      case TrafficLevel.medium:
-        return 1.5;
-      case TrafficLevel.high:
-        return 2.0 + _random.nextDouble(); // 2.0x to 3.0x
-    }
+  void reset() {
+    _currentScenario = TrafficScenario.normal;
+    _manualIntensity = 0.5;
+    applyTraffic();
   }
 }

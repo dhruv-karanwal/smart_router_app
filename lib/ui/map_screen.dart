@@ -7,11 +7,9 @@ import '../services/traffic_manager.dart';
 import '../services/routing_engine.dart';
 import '../services/routing_service.dart';
 import '../controllers/simulation_controller.dart';
-import '../algorithms/base_algorithm.dart';
-import '../models/hospital.dart';
-import 'bottom_sheet.dart';
-import 'hospital_selection_card.dart';
-import 'eta_distance_card.dart';
+import 'info_card.dart';
+import 'hospital_bottom_sheet.dart';
+import 'simulation_controls.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -27,21 +25,24 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   late final SimulationController _simulationController;
   final RoutingService _osrmRoutingService = RoutingService();
 
-  String _selectedEmergency = 'General Emergency';
-  Hospital? _targetHospital;
   List<LatLng>? _roadPath;
+  bool _isNavigating = false;
+  LatLng? _currentAmbulancePos;
   
   final MapController _mapController = MapController();
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+  
+  AnimationController? _navigationController;
+  Animation<int>? _pathStepAnimation;
 
   @override
   void initState() {
     super.initState();
     
-    // Initialize services
     _graphModel = GraphModel();
+    _currentAmbulancePos = _graphModel.ambulanceLocation.position;
     _trafficManager = TrafficManager(_graphModel);
     _routingEngine = RoutingEngine();
     _simulationController = SimulationController(
@@ -50,7 +51,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       routingEngine: _routingEngine,
     );
 
-    // Listen for simulation changes
     _simulationController.addListener(_onSimulationChanged);
 
     _pulseController = AnimationController(
@@ -58,12 +58,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 1500),
     )..repeat(reverse: true);
     
-    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.6).animate(
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.4).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
-    _targetHospital = _graphModel.hospitals.firstWhere((h) => h.name == 'Premchand Oswal Hospital', orElse: () => _graphModel.hospitals.first);
-    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _calculateRoute();
     });
@@ -74,6 +72,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _simulationController.removeListener(_onSimulationChanged);
     _simulationController.dispose();
     _pulseController.dispose();
+    _navigationController?.dispose();
     super.dispose();
   }
 
@@ -82,11 +81,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   void _calculateRoute() async {
-    if (_targetHospital == null) return;
+    final target = _simulationController.selectedHospital;
+    if (target == null) return;
     
     _simulationController.updateRoute(
       _graphModel.ambulanceLocation,
-      _targetHospital!,
+      target,
     );
 
     final best = _simulationController.bestRoute;
@@ -94,15 +94,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
     if (best != null && best.path.isNotEmpty) {
       final points = best.path.map((n) => n.position).toList();
-      final routeWaypoints = [points.first, points.last];
-      
-      roadPath = await _osrmRoutingService.fetchRoute(routeWaypoints);
+      roadPath = await _osrmRoutingService.fetchRoute(points);
 
-      // Smooth camera transition
-      if (roadPath != null || points.isNotEmpty) {
-        final bounds = LatLngBounds.fromPoints(roadPath ?? points);
+      if (roadPath != null) {
+        // Only fit camera if it's the first time or hospital changed significantly
+        // For now, let's just fit it
+        final bounds = LatLngBounds.fromPoints(roadPath);
         _mapController.fitCamera(
-          CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(80)),
+          CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(120)),
         );
       }
     }
@@ -114,238 +113,189 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
   }
 
-  void _onHospitalSelected(Hospital hospital) {
-    setState(() {
-      _targetHospital = hospital;
-    });
-    _calculateRoute();
+  void _showHospitalSelection() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => ListenableBuilder(
+        listenable: _simulationController,
+        builder: (context, _) => HospitalBottomSheet(controller: _simulationController),
+      ),
+    );
   }
 
-  void _onEmergencyChanged(String? val) {
-    if (val != null) {
-      setState(() {
-        _selectedEmergency = val;
-        _targetHospital = _graphModel.getPriorityHospital(val);
+  void _startNavigation() {
+    if (_roadPath == null || _roadPath!.isEmpty) return;
+
+    _navigationController?.dispose();
+    _navigationController = AnimationController(
+      vsync: this,
+      duration: Duration(seconds: (_roadPath!.length / 5).clamp(5, 30).toInt()),
+    );
+
+    _pathStepAnimation = IntTween(begin: 0, end: _roadPath!.length - 1).animate(_navigationController!)
+      ..addListener(() {
+        if (_pathStepAnimation != null) {
+          setState(() {
+            _currentAmbulancePos = _roadPath![_pathStepAnimation!.value];
+          });
+        }
+      })
+      ..addStatusListener((status) {
+        if (status == AnimationStatus.completed) {
+          setState(() => _isNavigating = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Arrived at Hospital!'), backgroundColor: Colors.green),
+          );
+        }
       });
-      _calculateRoute();
-    }
+
+    _navigationController!.forward();
+    setState(() => _isNavigating = true);
   }
 
-  void _onTrafficToggled(bool val) {
-    _simulationController.toggleTrafficSimulation(val);
+  void _stopNavigation() {
+    _navigationController?.stop();
+    setState(() {
+      _isNavigating = false;
+      _currentAmbulancePos = _graphModel.ambulanceLocation.position;
+    });
   }
 
-  void _onBlockRandomRoad() {
-    _simulationController.blockRandomRoad();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Road blocked! Rerouting...'),
-        backgroundColor: Colors.orange,
-        duration: Duration(seconds: 1),
+  void _showSimulationControls() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => ListenableBuilder(
+        listenable: _simulationController,
+        builder: (context, _) => SimulationControls(controller: _simulationController),
       ),
     );
   }
 
-  void _onResetMap() {
-    _simulationController.resetMap();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Map reset to default state.'),
-        backgroundColor: Colors.blueGrey,
-        duration: Duration(seconds: 1),
-      ),
-    );
+  Color _getTrafficColor(double level) {
+    if (level < 0.3) return Colors.green;
+    if (level < 0.7) return Colors.orange;
+    return Colors.red;
   }
 
   @override
   Widget build(BuildContext context) {
     final bestResult = _simulationController.bestRoute;
-    
-    // Generate ETA/Distance based on the selected hospital or best result
+    final selectedHospital = _simulationController.selectedHospital;
+    final hospitalName = selectedHospital?.name ?? 'Searching...';
     final distanceStr = bestResult != null ? bestResult.totalWeight.toStringAsFixed(1) : '0.0';
-    final etaStr = bestResult != null ? (bestResult.totalWeight * 3.5).toStringAsFixed(0) : '0';
-    
-    final trafficEnabled = _simulationController.isTrafficSimulationEnabled;
-    final trafficStatus = trafficEnabled ? 'Heavy Traffic' : 'Light Traffic';
-    final trafficColor = trafficEnabled ? const Color(0xFFEF4444) : const Color(0xFF10B981);
+    final etaStr = bestResult != null ? (bestResult.totalWeight * 2.5).toStringAsFixed(0) : '0';
+    final reliability = bestResult != null ? 0.95 - (_simulationController.trafficIntensity * 0.4) : 0.0;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // 1. Fullscreen Map
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
               initialCenter: _graphModel.ambulanceLocation.position,
-              initialZoom: 14.0,
+              initialZoom: 14.5,
+              interactionOptions: const InteractionOptions(
+                flags: InteractiveFlag.all,
+              ),
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.emergency_route_optimizer',
+                urlTemplate: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+                subdomains: const ['a', 'b', 'c', 'd'],
               ),
-              // Blocked Roads Layer
-              PolylineLayer(
-                polylines: _graphModel.adjacencyList.values
-                    .expand((e) => e)
-                    .where((e) => e.isBlocked)
-                    .map((e) => Polyline(
-                          points: [e.source.position, e.destination.position],
-                          color: Colors.orange.withOpacity(0.8),
-                          strokeWidth: 8.0,
-                          pattern: StrokePattern.dashed(segments: [10, 5]),
-                        ))
-                    .toList(),
-              ),
-              PolylineLayer(
-                polylines: [
-                  // Soft Glow Effect (Highly transparent, thick blue)
-                  if (_roadPath != null)
+              
+              // Best Route Layer (Smooth Road-Following)
+              if (_roadPath != null) ...[
+                // Glow
+                PolylineLayer(
+                  polylines: [
                     Polyline(
                       points: _roadPath!,
-                      color: const Color(0xFF3B82F6).withOpacity(0.3),
-                      strokeWidth: 16.0,
-                      strokeJoin: StrokeJoin.round,
-                      strokeCap: StrokeCap.round,
-                    )
-                  else if (bestResult != null)
-                    Polyline(
-                      points: bestResult.path.map((n) => n.position).toList(),
-                      color: const Color(0xFF3B82F6).withOpacity(0.3),
-                      strokeWidth: 16.0,
-                      strokeJoin: StrokeJoin.round,
-                      strokeCap: StrokeCap.round,
+                      color: Colors.blue.withOpacity(0.2),
+                      strokeWidth: 14.0,
                     ),
-                  // Best route Outline (Thick White)
-                  if (_roadPath != null)
                     Polyline(
                       points: _roadPath!,
-                      color: Colors.white,
-                      strokeWidth: 10.0,
-                      strokeJoin: StrokeJoin.round,
-                      strokeCap: StrokeCap.round,
-                    )
-                  else if (bestResult != null)
-                    Polyline(
-                      points: bestResult.path.map((n) => n.position).toList(),
-                      color: Colors.white,
-                      strokeWidth: 10.0,
-                      strokeJoin: StrokeJoin.round,
-                      strokeCap: StrokeCap.round,
-                    ),
-                  // Best route Core (Thin Blue)
-                  if (_roadPath != null)
-                    Polyline(
-                      points: _roadPath!,
-                      color: const Color(0xFF3B82F6),
-                      strokeWidth: 6.0,
-                      strokeJoin: StrokeJoin.round,
-                      strokeCap: StrokeCap.round,
-                    )
-                  else if (bestResult != null)
-                    Polyline(
-                      points: bestResult.path.map((n) => n.position).toList(),
-                      color: const Color(0xFF3B82F6),
+                      color: Colors.blue,
                       strokeWidth: 6.0,
                       strokeJoin: StrokeJoin.round,
                       strokeCap: StrokeCap.round,
                     ),
-                ],
-              ),
+                  ],
+                ),
+              ],
+
               MarkerLayer(
                 markers: [
-                  // Other hospitals (small red pins)
-                  ..._graphModel.hospitals.where((h) => h != _targetHospital).map((h) => Marker(
-                    point: h.position,
-                    width: 30,
-                    height: 30,
-                    child: Opacity(
-                      opacity: 0.6,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEF4444),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 2),
-                        ),
-                        child: const Icon(
-                          Icons.local_hospital,
-                          color: Colors.white,
-                          size: 14,
-                        ),
-                      ),
-                    ),
-                  )),
-                  
-                  // Route path nodes (white circles at bends)
-                  if (bestResult != null)
-                    ...bestResult.path.skip(1).take(bestResult.path.length - 2).map((n) => Marker(
-                      point: n.position,
-                      width: 12,
-                      height: 12,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: const Color(0xFF3B82F6), width: 2),
-                        ),
-                      ),
-                    )),
-
-                  // Target Hospital (Large red pin with text)
-                  if (_targetHospital != null)
-                    Marker(
-                      point: _targetHospital!.position,
-                      width: 100,
-                      height: 80,
-                      alignment: Alignment.topCenter,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFEF4444),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 2),
-                              boxShadow: const [
-                                BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
-                              ],
-                            ),
-                            child: const Icon(
-                              Icons.local_hospital,
-                              color: Colors.white,
-                              size: 20,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.9),
-                              borderRadius: BorderRadius.circular(4),
-                              boxShadow: const [
-                                BoxShadow(color: Colors.black12, blurRadius: 2, offset: Offset(0, 1))
-                              ],
-                            ),
-                            child: Text(
-                              _targetHospital!.name.split(' ').take(2).join('\n'),
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Color(0xFFEF4444),
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold,
-                                height: 1.1,
+                  // Road Blocking Interaction Points (Small invisible or subtle markers)
+                  ..._graphModel.adjacencyList.values
+                      .expand((e) => e)
+                      .map((e) {
+                        final midLat = (e.source.position.latitude + e.destination.position.latitude) / 2;
+                        final midLng = (e.source.position.longitude + e.destination.position.longitude) / 2;
+                        return Marker(
+                          point: LatLng(midLat, midLng),
+                          width: 24,
+                          height: 24,
+                          child: GestureDetector(
+                            onTap: () => _simulationController.toggleRoadBlock(e),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: e.isBlocked ? Colors.red.withOpacity(0.8) : Colors.black12,
+                                shape: BoxShape.circle,
+                                border: e.isBlocked ? Border.all(color: Colors.white, width: 2) : null,
                               ),
+                              child: e.isBlocked ? const Icon(Icons.block, size: 14, color: Colors.white) : null,
                             ),
                           ),
-                        ],
-                      ),
-                    ),
+                        );
+                      }),
 
-                  // Ambulance (Blue dot with white ring and pulsing halo)
+                  // Hospitals
+                  ..._graphModel.hospitals.map((h) {
+                    final isSelected = selectedHospital?.id == h.id;
+                    return Marker(
+                      point: h.position,
+                      width: isSelected ? 50 : 40,
+                      height: isSelected ? 50 : 40,
+                      child: GestureDetector(
+                        onTap: () => _simulationController.selectHospital(h, manual: true),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 300),
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: isSelected ? Colors.red : Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSelected ? Colors.white : Colors.red, 
+                              width: isSelected ? 3 : 2
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.2),
+                                blurRadius: 6,
+                                offset: const Offset(0, 3),
+                              )
+                            ],
+                          ),
+                          child: Icon(
+                            Icons.local_hospital, 
+                            color: isSelected ? Colors.white : Colors.red, 
+                            size: isSelected ? 24 : 18
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+
+                  // Ambulance
                   Marker(
-                    point: _graphModel.ambulanceLocation.position,
+                    point: _currentAmbulancePos ?? _graphModel.ambulanceLocation.position,
                     width: 60,
                     height: 60,
                     child: AnimatedBuilder(
@@ -357,25 +307,26 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                             Transform.scale(
                               scale: _pulseAnimation.value,
                               child: Container(
-                                width: 30,
-                                height: 30,
+                                width: 40,
+                                height: 40,
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: const Color(0xFF3B82F6).withOpacity(0.3),
+                                  color: Colors.blue.withOpacity(0.2),
                                 ),
                               ),
                             ),
                             Container(
-                              width: 18,
-                              height: 18,
+                              width: 24,
+                              height: 24,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: const Color(0xFF3B82F6),
+                                color: Colors.blue,
                                 border: Border.all(color: Colors.white, width: 3),
                                 boxShadow: const [
                                   BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
                                 ],
                               ),
+                              child: const Icon(Icons.navigation, color: Colors.white, size: 12),
                             ),
                           ],
                         );
@@ -387,147 +338,145 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             ],
           ),
 
-          // 2. Custom Top Bar
+          // Top Navigation Bar
           Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: Container(
-              padding: EdgeInsets.only(
-                top: MediaQuery.of(context).padding.top + 10,
-                bottom: 15,
-                left: 16,
-                right: 16,
-              ),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.05),
-                    blurRadius: 10,
-                    offset: const Offset(0, 2),
+            top: MediaQuery.of(context).padding.top + 10,
+            left: 20,
+            right: 20,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.85),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white.withOpacity(0.5)),
                   ),
-                ],
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEF4444),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.add, color: Colors.white, size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Text(
-                      'Emergency Route Optimizer',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.black87,
+                  child: Row(
+                    children: [
+                      DropdownButton<String>(
+                        value: _simulationController.emergencyType,
+                        underline: const SizedBox(),
+                        icon: const Icon(Icons.arrow_drop_down, color: Colors.blue),
+                        items: ['General', 'Heart Attack', 'Accident'].map((String type) {
+                          return DropdownMenuItem<String>(
+                            value: type,
+                            child: Text(type, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                          );
+                        }).toList(),
+                        onChanged: (val) => _simulationController.setEmergencyType(val!),
                       ),
-                    ),
+                      const VerticalDivider(width: 20),
+                      const Expanded(
+                        child: Text(
+                          'Route Optimizer',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.tune_rounded, color: Colors.blue),
+                        onPressed: _showSimulationControls,
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
 
-          // 3. Right Action Buttons
+          // Bottom Info Card & Actions
           Positioned(
-            top: MediaQuery.of(context).padding.top + 80,
-            right: 16,
+            bottom: 30,
+            left: 20,
+            right: 20,
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                GestureDetector(
-                  onTap: () {
-                    _mapController.move(_graphModel.ambulanceLocation.position, 14.0);
-                  },
-                  child: _buildFloatingActionButton(Icons.my_location),
+                RouteInfoCard(
+                  hospitalName: hospitalName,
+                  eta: '$etaStr min',
+                  distance: '$distanceStr km',
+                  trafficStatus: _simulationController.trafficIntensity > 0.7 ? 'Heavy' : 'Moderate',
+                  trafficColor: _getTrafficColor(_simulationController.trafficIntensity),
+                  reliability: reliability,
                 ),
-                const SizedBox(height: 12),
-                
-                // Emergency Type Selector
-                PopupMenuButton<String>(
-                  onSelected: _onEmergencyChanged,
-                  initialValue: _selectedEmergency,
-                  offset: const Offset(-160, 0),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  itemBuilder: (context) => ['General Emergency', 'Heart Attack', 'Accident']
-                      .map((e) => PopupMenuItem(value: e, child: Text(e)))
-                      .toList(),
-                  child: _buildFloatingActionButton(
-                    Icons.medical_services_outlined,
-                    color: _selectedEmergency != 'General Emergency' ? const Color(0xFFEF4444) : Colors.black87,
-                  ),
-                ),
-                
-                const SizedBox(height: 12),
-                
-                // Traffic Toggle
-                GestureDetector(
-                  onTap: () => _onTrafficToggled(!_simulationController.isTrafficSimulationEnabled),
-                  child: _buildFloatingActionButton(
-                    Icons.traffic_outlined,
-                    color: _simulationController.isTrafficSimulationEnabled ? const Color(0xFFEF4444) : Colors.black87,
-                  ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _showHospitalSelection,
+                        icon: const Icon(Icons.list),
+                        label: const Text('Hospitals'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.blue,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: 4,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          if (_isNavigating) {
+                            _stopNavigation();
+                          } else {
+                            _startNavigation();
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _isNavigating ? Colors.red : Colors.blue,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: 8,
+                        ),
+                        child: Text(
+                          _isNavigating ? 'STOP' : 'NAVIGATE',
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-
-          // 4. Hospital Selection Card
-          HospitalSelectionCard(
-            hospitals: _graphModel.hospitals,
-            selectedHospital: _targetHospital,
-            onHospitalSelected: _onHospitalSelected,
-          ),
-
-          // 5. ETA & Distance Card
-          EtaDistanceCard(
-            eta: '$etaStr min',
-            distance: '$distanceStr km',
-            trafficStatus: trafficStatus,
-            trafficColor: trafficColor,
-          ),
-
-          // 6. Bottom Sheet Controls
-          CustomBottomSheet(
-            selectedEmergency: _selectedEmergency,
-            trafficEnabled: _simulationController.isTrafficSimulationEnabled,
-            onEmergencyChanged: _onEmergencyChanged,
-            onTrafficToggled: _onTrafficToggled,
-            onBlockRandomRoad: _onBlockRandomRoad,
-            onResetMap: _onResetMap,
-            onStartNavigation: _calculateRoute,
+          
+          // Side Controls
+          Positioned(
+            right: 20,
+            top: MediaQuery.of(context).padding.top + 90,
+            child: Column(
+              children: [
+                _buildMapAction(Icons.my_location, () {
+                   _mapController.move(_graphModel.ambulanceLocation.position, 15.0);
+                }),
+                const SizedBox(height: 12),
+                _buildMapAction(Icons.explore_outlined, () {
+                   _mapController.rotate(0);
+                }),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildFloatingActionButton(IconData? icon, {String? text, Color color = Colors.black87}) {
-    return Container(
-      width: 48,
-      height: 48,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        shape: BoxShape.circle,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Center(
-        child: icon != null 
-            ? Icon(icon, color: color)
-            : Text(text ?? '', style: TextStyle(fontWeight: FontWeight.bold, color: color)),
-      ),
+  Widget _buildMapAction(IconData icon, VoidCallback onTap) {
+    return FloatingActionButton.small(
+      heroTag: null,
+      onPressed: onTap,
+      backgroundColor: Colors.white,
+      foregroundColor: Colors.black87,
+      child: Icon(icon),
     );
   }
 }

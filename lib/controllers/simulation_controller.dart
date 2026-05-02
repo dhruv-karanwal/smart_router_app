@@ -1,64 +1,117 @@
-import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../services/graph_model.dart';
 import '../services/traffic_manager.dart';
 import '../services/routing_engine.dart';
-import '../algorithms/base_algorithm.dart';
 import '../models/node.dart';
 import '../models/edge.dart';
+import '../services/hospital_selector.dart';
+import '../models/hospital.dart';
+import '../algorithms/base_algorithm.dart';
 
 class SimulationController extends ChangeNotifier {
   final GraphModel graph;
   final TrafficManager trafficManager;
   final RoutingEngine routingEngine;
-  final Random _random = Random();
-
-  bool _isTrafficSimulationEnabled = false;
+  late final HospitalSelector _hospitalSelector;
+  
+  double _trafficIntensity = 0.5;
+  TrafficScenario _currentScenario = TrafficScenario.normal;
+  String _emergencyType = 'General';
+  Hospital? _selectedHospital;
+  bool _isAutoSelect = true;
+  List<HospitalRank> _hospitalRanks = [];
   AlgorithmResult? _bestRoute;
 
   SimulationController({
     required this.graph,
     required this.trafficManager,
     required this.routingEngine,
-  });
+  }) {
+    _hospitalSelector = HospitalSelector(graph: graph, routingEngine: routingEngine);
+    _selectedHospital = graph.hospitals.first;
+    refreshHospitals();
+  }
 
-  bool get isTrafficSimulationEnabled => _isTrafficSimulationEnabled;
+  double get trafficIntensity => _trafficIntensity;
+  TrafficScenario get currentScenario => _currentScenario;
+  String get emergencyType => _emergencyType;
+  Hospital? get selectedHospital => _selectedHospital;
+  bool get isAutoSelect => _isAutoSelect;
+  List<HospitalRank> get hospitalRanks => _hospitalRanks;
   AlgorithmResult? get bestRoute => _bestRoute;
 
-  void toggleTrafficSimulation(bool enabled) {
-    _isTrafficSimulationEnabled = enabled;
-    trafficManager.updateTraffic(enabled);
+  void setEmergencyType(String type) {
+    _emergencyType = type;
+    if (_isAutoSelect) {
+      refreshHospitals();
+      _selectedHospital = _hospitalRanks.first.hospital;
+    }
     notifyListeners();
   }
 
-  void blockRandomRoad() {
-    final allEdges = graph.adjacencyList.values.expand((e) => e).toList();
-    if (allEdges.isEmpty) return;
+  void selectHospital(Hospital hospital, {bool manual = true}) {
+    _selectedHospital = hospital;
+    if (manual) _isAutoSelect = false;
+    notifyListeners();
+  }
 
-    final randomEdge = allEdges[_random.nextInt(allEdges.length)];
-    randomEdge.isBlocked = true;
-    
-    // Also block the reverse edge to be consistent (as the graph is bidirectional)
-    final reverseEdge = graph.adjacencyList[randomEdge.destination]?.firstWhere(
-      (e) => e.destination == randomEdge.source,
-      orElse: () => randomEdge,
+  void toggleAutoSelect(bool value) {
+    _isAutoSelect = value;
+    if (value) {
+      refreshHospitals();
+      _selectedHospital = _hospitalRanks.first.hospital;
+    }
+    notifyListeners();
+  }
+
+  void refreshHospitals() {
+    _hospitalRanks = _hospitalSelector.rankHospitals(
+      hospitals: graph.hospitals,
+      emergencyType: _emergencyType,
+      trafficIntensity: _trafficIntensity,
     );
-    if (reverseEdge != null) reverseEdge.isBlocked = true;
+  }
 
+  void setTrafficIntensity(double intensity) {
+    _trafficIntensity = intensity;
+    _currentScenario = TrafficScenario.custom;
+    trafficManager.setManualIntensity(intensity);
+    if (_isAutoSelect) refreshHospitals();
+    notifyListeners();
+  }
+
+
+  void setScenario(TrafficScenario scenario) {
+    _currentScenario = scenario;
+    trafficManager.setScenario(scenario);
+    if (_isAutoSelect) refreshHospitals();
+    notifyListeners();
+  }
+
+  void toggleRoadBlock(Edge edge) {
+    edge.isBlocked = !edge.isBlocked;
+    final reverseEdges = graph.adjacencyList[edge.destination] ?? [];
+    for (var e in reverseEdges) {
+      if (e.destination == edge.source) {
+        e.isBlocked = edge.isBlocked;
+      }
+    }
     notifyListeners();
   }
 
   void resetMap() {
     graph.resetGraph();
-    _isTrafficSimulationEnabled = false;
+    trafficManager.reset();
+    _trafficIntensity = 0.5;
+    _currentScenario = TrafficScenario.normal;
+    _isAutoSelect = true;
+    _selectedHospital = graph.hospitals.first;
+    refreshHospitals();
     notifyListeners();
   }
 
   void updateRoute(Node start, Node end) {
     final results = routingEngine.runAll(graph.adjacencyList, start, end);
     _bestRoute = routingEngine.selectBest(results);
-    // Note: We don't notifyListeners here if this is called during a build or from map screen to avoid loops,
-    // but if it's called from simulation actions, we should.
-    // However, the map screen will call this when it detects a change.
   }
 }

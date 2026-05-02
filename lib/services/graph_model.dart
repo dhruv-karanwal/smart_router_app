@@ -58,31 +58,30 @@ class GraphModel {
 
     nodes.addAll([ambulanceLocation, hA, hB, hC, hD, i1, i2, i3, i4]);
 
-    _addEdge(ambulanceLocation, i1, 0.5);
-    _addEdge(ambulanceLocation, i3, 0.7);
-    _addEdge(i1, hC, 0.6);
-    _addEdge(i1, i2, 0.4);
-    _addEdge(i2, hA, 0.3);
-    _addEdge(i3, i4, 0.5);
-    _addEdge(i4, hB, 0.6);
-    _addEdge(i2, i4, 0.8);
-    _addEdge(i3, hC, 0.4);
-    _addEdge(i4, i2, 0.8); // Bidirectional
-    _addEdge(hC, i3, 0.4);
-    _addEdge(hA, i2, 0.3);
-    _addEdge(hD, i2, 0.4);
-    _addEdge(hD, i4, 0.5);
+    _addEdge(ambulanceLocation, i1);
+    _addEdge(ambulanceLocation, i3);
+    _addEdge(i1, hC);
+    _addEdge(i1, i2);
+    _addEdge(i2, hA);
+    _addEdge(i3, i4);
+    _addEdge(i4, hB);
+    _addEdge(i2, i4);
+    _addEdge(i3, hC);
+    _addEdge(hD, i2);
+    _addEdge(hD, i4);
   }
 
-  void _addEdge(Node u, Node v, double weight) {
-    adjacencyList.putIfAbsent(u, () => []).add(Edge(source: u, destination: v, weight: weight));
-    adjacencyList.putIfAbsent(v, () => []).add(Edge(source: v, destination: u, weight: weight));
+  void _addEdge(Node u, Node v, [double? weight]) {
+    final dist = weight ?? _calculateDistance(u.position, v.position) * 111;
+    adjacencyList.putIfAbsent(u, () => []).add(Edge(source: u, destination: v, weight: dist));
+    adjacencyList.putIfAbsent(v, () => []).add(Edge(source: v, destination: u, weight: dist));
   }
 
   void resetGraph() {
     for (var edges in adjacencyList.values) {
       for (var edge in edges) {
-        edge.trafficMultiplier = 1.0;
+        edge.trafficLevel = 0.0;
+        edge.riskFactor = 0.0;
         edge.isBlocked = false;
       }
     }

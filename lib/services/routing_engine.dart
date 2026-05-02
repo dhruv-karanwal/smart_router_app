@@ -21,15 +21,31 @@ class RoutingEngine {
   }
 
   AlgorithmResult selectBest(List<AlgorithmResult> results) {
-    // Select best based on minimum total weight (which includes traffic)
-    // Exclude algorithms that failed to find a path (weight = infinity)
-    final validResults = results.where((r) => r.path.isNotEmpty && r.totalWeight < double.infinity).toList();
+    // ONLY allow Dijkstra and A* for final routing as per requirements
+    final optimalResults = results.where((r) => 
+      (r.algorithmName == 'Dijkstra' || r.algorithmName == 'A*') && 
+      r.path.isNotEmpty && 
+      r.totalWeight < double.infinity
+    ).toList();
     
-    if (validResults.isEmpty) {
-      return results.first; // Fallback
+    if (optimalResults.isEmpty) {
+      // Fallback only if optimal ones fail
+      return results.firstWhere((r) => r.path.isNotEmpty, orElse: () => results.first);
     }
 
-    validResults.sort((a, b) => a.totalWeight.compareTo(b.totalWeight));
-    return validResults.first;
+    // Sort by total distance (weight)
+    optimalResults.sort((a, b) => a.totalWeight.compareTo(b.totalWeight));
+    final best = optimalResults.first;
+
+    // Debug Verification (as requested)
+    print('--- ROUTING DEBUG ---');
+    print('Algorithm: ${best.algorithmName}');
+    print('Total Distance: ${best.totalWeight.toStringAsFixed(3)} km');
+    print('Path Nodes: ${best.path.map((n) => n.id).join(' -> ')}');
+    print('Visited Nodes: ${best.nodesVisited}');
+    print('No loops detected: ${best.path.toSet().length == best.path.length}');
+    print('---------------------');
+
+    return best;
   }
 }

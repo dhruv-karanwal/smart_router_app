@@ -7,6 +7,11 @@ import '../services/traffic_manager.dart';
 import '../services/routing_engine.dart';
 import '../services/routing_service.dart';
 import '../controllers/simulation_controller.dart';
+import '../models/hospital.dart';
+import '../models/incident.dart';
+import '../utils/geo_utils.dart';
+import '../algorithms/base_algorithm.dart';
+import '../models/edge.dart';
 import 'info_card.dart';
 import 'hospital_bottom_sheet.dart';
 import 'simulation_controls.dart';
@@ -93,12 +98,13 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     List<LatLng>? roadPath;
 
     if (best != null && best.path.isNotEmpty) {
-      final points = best.path.map((n) => n.position).toList();
+      // Logic vs Visual Separation:
+      // Use only start and end for the visual OSRM route to follow real roads
+      final points = [best.path.first.position, best.path.last.position];
       roadPath = await _osrmRoutingService.fetchRoute(points);
 
-      if (roadPath != null) {
-        // Only fit camera if it's the first time or hospital changed significantly
-        // For now, let's just fit it
+      if (roadPath != null && _roadPath == null) {
+        // Fit camera only on first route load
         final bounds = LatLngBounds.fromPoints(roadPath);
         _mapController.fitCamera(
           CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(120)),
@@ -175,6 +181,19 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
+  IconData _getEmergencyIcon(String type) {
+    switch (type) {
+      case 'Heart Attack': return Icons.favorite;
+      case 'Cardiac Arrest': return Icons.bolt;
+      case 'Stroke': return Icons.psychology;
+      case 'Accident': return Icons.warning;
+      case 'Severe Bleeding': return Icons.bloodtype;
+      case 'Burns': return Icons.whatshot;
+      case 'Poisoning': return Icons.science;
+      default: return Icons.emergency;
+    }
+  }
+
   Color _getTrafficColor(double level) {
     if (level < 0.3) return Colors.green;
     if (level < 0.7) return Colors.orange;
@@ -209,19 +228,46 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 subdomains: const ['a', 'b', 'c', 'd'],
               ),
               
+              // Incident Markers
+            MarkerLayer(
+              markers: _simulationController.incidents.map((incident) => Marker(
+                point: incident.location,
+                width: 40,
+                height: 40,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(color: Colors.black26, blurRadius: 4, spreadRadius: 1),
+                    ],
+                  ),
+                  child: Center(
+                    child: Text(
+                      incident.icon,
+                      style: const TextStyle(fontSize: 20),
+                    ),
+                  ),
+                ),
+              )).toList(),
+            ),
               // Best Route Layer (Smooth Road-Following)
               if (_roadPath != null) ...[
                 // Glow
                 PolylineLayer(
                   polylines: [
+                    // Outer Glow / Shadow
                     Polyline(
                       points: _roadPath!,
                       color: Colors.blue.withOpacity(0.2),
-                      strokeWidth: 14.0,
+                      strokeWidth: 12.0,
+                      strokeJoin: StrokeJoin.round,
+                      strokeCap: StrokeCap.round,
                     ),
+                    // Main Route Line
                     Polyline(
                       points: _roadPath!,
-                      color: Colors.blue,
+                      color: const Color(0xFF2563EB), // Premium Blue
                       strokeWidth: 6.0,
                       strokeJoin: StrokeJoin.round,
                       strokeCap: StrokeCap.round,
@@ -232,61 +278,60 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
               MarkerLayer(
                 markers: [
-                  // Road Blocking Interaction Points (Small invisible or subtle markers)
-                  ..._graphModel.adjacencyList.values
-                      .expand((e) => e)
-                      .map((e) {
-                        final midLat = (e.source.position.latitude + e.destination.position.latitude) / 2;
-                        final midLng = (e.source.position.longitude + e.destination.position.longitude) / 2;
-                        return Marker(
-                          point: LatLng(midLat, midLng),
-                          width: 24,
-                          height: 24,
-                          child: GestureDetector(
-                            onTap: () => _simulationController.toggleRoadBlock(e),
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: e.isBlocked ? Colors.red.withOpacity(0.8) : Colors.black12,
-                                shape: BoxShape.circle,
-                                border: e.isBlocked ? Border.all(color: Colors.white, width: 2) : null,
-                              ),
-                              child: e.isBlocked ? const Icon(Icons.block, size: 14, color: Colors.white) : null,
-                            ),
-                          ),
-                        );
-                      }),
 
                   // Hospitals
                   ..._graphModel.hospitals.map((h) {
                     final isSelected = selectedHospital?.id == h.id;
+                    final distance = GeoUtils.haversineDistance(_graphModel.ambulanceLocation.position, h.position);
+                    
+                    // Visual styling based on distance
+                    double size = 40.0;
+                    double opacity = 1.0;
+                    
+                    if (distance > 6.0) {
+                      size = 32.0;
+                      opacity = 0.6;
+                    } else if (distance > 3.0) {
+                      size = 36.0;
+                      opacity = 0.85;
+                    }
+
+                    if (isSelected) {
+                      size = 50.0;
+                      opacity = 1.0;
+                    }
+
                     return Marker(
                       point: h.position,
-                      width: isSelected ? 50 : 40,
-                      height: isSelected ? 50 : 40,
+                      width: size + 10,
+                      height: size + 10,
                       child: GestureDetector(
                         onTap: () => _simulationController.selectHospital(h, manual: true),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 300),
-                          padding: const EdgeInsets.all(4),
-                          decoration: BoxDecoration(
-                            color: isSelected ? Colors.red : Colors.white,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: isSelected ? Colors.white : Colors.red, 
-                              width: isSelected ? 3 : 2
+                        child: Opacity(
+                          opacity: opacity,
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 300),
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: isSelected ? Colors.red : Colors.white,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: isSelected ? Colors.white : Colors.red, 
+                                width: isSelected ? 3 : 2
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.2),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 3),
+                                )
+                              ],
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.2),
-                                blurRadius: 6,
-                                offset: const Offset(0, 3),
-                              )
-                            ],
-                          ),
-                          child: Icon(
-                            Icons.local_hospital, 
-                            color: isSelected ? Colors.white : Colors.red, 
-                            size: isSelected ? 24 : 18
+                            child: Icon(
+                              Icons.local_hospital, 
+                              color: isSelected ? Colors.white : Colors.red, 
+                              size: size * 0.5,
+                            ),
                           ),
                         ),
                       ),
@@ -356,17 +401,24 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   ),
                   child: Row(
                     children: [
-                      DropdownButton<String>(
-                        value: _simulationController.emergencyType,
-                        underline: const SizedBox(),
-                        icon: const Icon(Icons.arrow_drop_down, color: Colors.blue),
-                        items: ['General', 'Heart Attack', 'Accident'].map((String type) {
-                          return DropdownMenuItem<String>(
-                            value: type,
-                            child: Text(type, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                          );
-                        }).toList(),
-                        onChanged: (val) => _simulationController.setEmergencyType(val!),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _getEmergencyIcon(_simulationController.emergencyType),
+                            color: Colors.redAccent,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _simulationController.emergencyType,
+                            style: const TextStyle(
+                              fontSize: 14, 
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        ],
                       ),
                       const VerticalDivider(width: 20),
                       const Expanded(

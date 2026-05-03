@@ -13,6 +13,19 @@ class TrafficManager {
 
   TrafficManager(this.graph);
 
+  double getIntensityForScenario(TrafficScenario scenario) {
+    switch (scenario) {
+      case TrafficScenario.normal: return 0.2;
+      case TrafficScenario.heavy: return 0.8;
+      case TrafficScenario.emergency: return 0.6;
+      case TrafficScenario.custom: return _manualIntensity;
+    }
+  }
+
+  void applyScenario(TrafficScenario scenario) {
+    setScenario(scenario);
+  }
+
   void setManualIntensity(double intensity) {
     _manualIntensity = intensity;
     _currentScenario = TrafficScenario.custom;

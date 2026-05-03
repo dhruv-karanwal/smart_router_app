@@ -44,7 +44,10 @@ class RoutingService {
       print('Exception fetching route: $e');
     }
 
-    // Fallback to straight lines if API fails
+    // Fallback to straight line between start and end if API fails
+    if (waypoints.isNotEmpty) {
+      return [waypoints.first, waypoints.last];
+    }
     return null;
   }
 }
